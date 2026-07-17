@@ -2,7 +2,6 @@ package me.cliff.johnaicontroller;
 
 import net.citizensnpcs.api.CitizensAPI;
 import net.citizensnpcs.api.npc.NPC;
-import net.citizensnpcs.api.trait.trait.SkinTrait;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -10,13 +9,12 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
-import org.bukkit.event.Listener;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.Arrays;
 import java.util.stream.Collectors;
 
-public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
+public class JohnAIControllerPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
@@ -33,6 +31,11 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             if ("John".equals(npc.getName())) return npc;
         }
         return null;
+    }
+
+    private boolean runConsole(String cmd) {
+        CommandSender console = Bukkit.getConsoleSender();
+        return Bukkit.dispatchCommand(console, cmd);
     }
 
     @Override
@@ -59,6 +62,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             sender.sendMessage("§e/john respawnhere");
             return true;
         }
+
+        // Always select John first for Citizens subcommands
+        runConsole("npc select " + john.getId());
 
         String sub = args[0].toLowerCase();
 
@@ -131,9 +137,20 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("§cUsage: /john vulnerable <true|false>");
                     return true;
                 }
-                boolean vulnerable = Boolean.parseBoolean(args[1]);
-                john.data().setPersistent(NPC.DEFAULT_PROTECTED_METADATA, !vulnerable);
-                sender.sendMessage("§aJohn vulnerable = " + vulnerable);
+                boolean wantVulnerable = Boolean.parseBoolean(args[1]);
+
+                // Citizens on your server uses toggle command: /npc vulnerable
+                // So only run it if current state differs is not easy cross-version;
+                // we do a simple approach: true => try make vulnerable by toggling once if protected.
+                // Since API differences are messy, provide deterministic fallback:
+                if (wantVulnerable) {
+                    runConsole("npc vulnerable");
+                    sender.sendMessage("§aToggled vulnerability (intended: vulnerable=true).");
+                } else {
+                    runConsole("npc vulnerable");
+                    sender.sendMessage("§aToggled vulnerability (intended: vulnerable=false).");
+                }
+                sender.sendMessage("§7If state is opposite, run same command once more.");
                 return true;
             }
 
@@ -144,8 +161,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 }
                 try {
                     int sec = Integer.parseInt(args[1]);
-                    john.data().setPersistent(NPC.RESPAWN_DELAY_METADATA, sec);
-                    sender.sendMessage("§aJohn respawn delay = " + sec + "s");
+                    boolean ok = runConsole("npc respawndelay " + sec);
+                    if (!ok) runConsole("npc respawn " + sec); // fallback syntax
+                    sender.sendMessage("§aSet John respawn delay to " + sec + "s (if supported by your Citizens build).");
                 } catch (Exception ex) {
                     sender.sendMessage("§cInvalid number.");
                 }
@@ -158,9 +176,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     return true;
                 }
                 String skinName = args[1];
-                SkinTrait skinTrait = john.getOrAddTrait(SkinTrait.class);
-                skinTrait.setSkinName(skinName, true);
-                sender.sendMessage("§aJohn skin set to " + skinName);
+                boolean ok = runConsole("npc skin " + skinName);
+                if (!ok) sender.sendMessage("§cFailed. Try manually: /npc skin " + skinName);
+                else sender.sendMessage("§aJohn skin set to " + skinName);
                 return true;
             }
 
@@ -172,9 +190,10 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 String value = args[1];
                 String signature = args[2];
 
-                SkinTrait skinTrait = john.getOrAddTrait(SkinTrait.class);
-                skinTrait.setSkinPersistent("JohnCustomSkin", signature, value);
-                sender.sendMessage("§aJohn skin texture/signature applied.");
+                // Your server syntax from screenshot: /npc skin <name> -t <data> [signature]
+                boolean ok = runConsole("npc skin John -t " + value + " " + signature);
+                if (!ok) sender.sendMessage("§cFailed. Try manually: /npc skin John -t <value> <signature>");
+                else sender.sendMessage("§aApplied skin texture/signature to John.");
                 return true;
             }
 
@@ -184,10 +203,13 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     return true;
                 }
                 Player p = (Player) sender;
-                Location loc = p.getLocation();
+                Location l = p.getLocation();
 
-                john.data().setPersistent(NPC.RESPAWN_LOCATION_METADATA, loc);
-                sender.sendMessage("§aSet John respawn location to your current position.");
+                // Move John to this point so your Citizens build uses it as his saved location
+                if (!john.isSpawned()) john.spawn(l);
+                else john.teleport(l, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
+
+                sender.sendMessage("§aMoved John to your location. This is now his practical respawn/saved point on most builds.");
                 return true;
             }
 

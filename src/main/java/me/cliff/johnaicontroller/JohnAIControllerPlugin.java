@@ -24,6 +24,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.RayTraceResult;
+import org.bukkit.util.Vector;
 
 import java.io.File;
 import java.io.InputStream;
@@ -35,14 +36,11 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
-
     private final Gson gson = new Gson();
-
     private String bridgeUrl = "http://127.0.0.1:3001/chat";
 
     // ---------- Simulated inventory ----------
     private final Map<Material, Integer> johnInv = new HashMap<>();
-
     private Material equippedMainHand = null;
     private Material equippedOffHand = null;
     private Material equippedHelmet = null;
@@ -53,6 +51,8 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     private File dataFile;
     private FileConfiguration dataCfg;
 
+    private boolean idleEnabled = true;
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
@@ -62,7 +62,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         loadJohnData();
 
         Bukkit.getPluginManager().registerEvents(this, this);
-        getLogger().info("JohnAIController v6 enabled.");
+        getLogger().info("JohnAIController v6+ enabled.");
     }
 
     @Override
@@ -114,7 +114,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         equippedChest = parseMaterial(dataCfg.getString("equip.chest"));
         equippedLegs = parseMaterial(dataCfg.getString("equip.legs"));
         equippedBoots = parseMaterial(dataCfg.getString("equip.boots"));
-
         applyVisualEquipment();
     }
 
@@ -385,6 +384,15 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             sender.sendMessage("§e/john offhand <item>");
             sender.sendMessage("§e/john use <item>");
             sender.sendMessage("§e/john say <text>");
+            sender.sendMessage("§e/john look <player>");
+            sender.sendMessage("§e/john goto <x> <y> <z> [world] [speed]");
+            sender.sendMessage("§e/john follow <player> [speed]");
+            sender.sendMessage("§e/john stop");
+            sender.sendMessage("§e/john idle <on|off>");
+            sender.sendMessage("§e/john vulnerable");
+            sender.sendMessage("§e/john respawndelay <seconds>");
+            sender.sendMessage("§e/john skinname <name>");
+            sender.sendMessage("§e/john skintex <value> <signature>");
             return true;
         }
 
@@ -405,12 +413,10 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("John is not spawned.");
                     return true;
                 }
-
                 double radius = 3.0;
                 if (args.length >= 2) {
                     try { radius = Double.parseDouble(args[1]); } catch (Exception ignored) {}
                 }
-
                 int picked = pickupNearbyItems(john.getEntity().getLocation(), radius);
                 saveJohnData();
                 sender.sendMessage("§aJohn picked up " + picked + " item stacks.");
@@ -426,26 +432,21 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("Usage: /john drop <item> [count]");
                     return true;
                 }
-
                 Material m = Material.matchMaterial(args[1]);
                 if (m == null) {
                     sender.sendMessage("Unknown item.");
                     return true;
                 }
-
                 int count = 1;
                 if (args.length >= 3) {
                     try { count = Math.max(1, Integer.parseInt(args[2])); } catch (Exception ignored) {}
                 }
-
                 if (!removeItem(m, count)) {
                     sender.sendMessage("John doesn't have enough " + m.name());
                     return true;
                 }
-
                 Location l = john.getEntity().getLocation().clone().add(0, 1.0, 0);
                 l.getWorld().dropItemNaturally(l, new ItemStack(m, count));
-
                 saveJohnData();
                 sender.sendMessage("§aJohn dropped " + count + " " + m.name());
                 return true;
@@ -465,7 +466,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("John doesn't have that item.");
                     return true;
                 }
-
                 if (isArmor(m)) {
                     String slot = armorSlot(m);
                     if ("helmet".equals(slot)) equippedHelmet = m;
@@ -475,7 +475,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 } else {
                     equippedMainHand = m;
                 }
-
                 applyVisualEquipment();
                 saveJohnData();
                 sender.sendMessage("§aEquipped " + m.name());
@@ -496,7 +495,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("John doesn't have that item.");
                     return true;
                 }
-
                 equippedOffHand = m;
                 applyVisualEquipment();
                 saveJohnData();
@@ -513,7 +511,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("Usage: /john use <item>");
                     return true;
                 }
-
                 Material m = Material.matchMaterial(args[1]);
                 if (m == null) {
                     sender.sendMessage("Unknown item.");
@@ -523,7 +520,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("John doesn't have that item.");
                     return true;
                 }
-
                 boolean ok = simulateUseItem(john.getEntity(), m);
                 if (ok) {
                     removeItem(m, 1);
@@ -542,6 +538,158 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 }
                 String msg = Arrays.stream(args).skip(1).collect(Collectors.joining(" "));
                 Bukkit.broadcastMessage("§bJohn§7: " + msg);
+                return true;
+            }
+
+            case "look": {
+                if (args.length < 2) {
+                    sender.sendMessage("Usage: /john look <player>");
+                    return true;
+                }
+                Player target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    sender.sendMessage("Player not online.");
+                    return true;
+                }
+                if (!john.isSpawned() || john.getEntity() == null) {
+                    sender.sendMessage("John is not spawned.");
+                    return true;
+                }
+
+                Entity je = john.getEntity();
+                Location from = je.getLocation();
+                Location to = target.getLocation().clone().add(0, 1.0, 0);
+                Vector dir = to.toVector().subtract(from.toVector());
+                Location out = from.clone();
+                out.setDirection(dir);
+                je.teleport(out);
+
+                sender.sendMessage("John now looks at " + target.getName());
+                return true;
+            }
+
+            case "goto": {
+                if (args.length < 4) {
+                    sender.sendMessage("Usage: /john goto <x> <y> <z> [world] [speed]");
+                    return true;
+                }
+                try {
+                    double x = Double.parseDouble(args[1]);
+                    double y = Double.parseDouble(args[2]);
+                    double z = Double.parseDouble(args[3]);
+
+                    World world = null;
+                    double speed = 1.2;
+
+                    if (args.length >= 5) {
+                        World maybe = Bukkit.getWorld(args[4]);
+                        if (maybe != null) world = maybe;
+                        else speed = Double.parseDouble(args[4]);
+                    }
+                    if (args.length >= 6) speed = Double.parseDouble(args[5]);
+
+                    if (world == null) {
+                        Entity e = john.getEntity();
+                        world = (e != null) ? e.getWorld() : Bukkit.getWorlds().get(0);
+                    }
+
+                    runConsole("npc select " + john.getId());
+                    runConsole("npc speed " + Math.max(0.7, Math.min(2.0, speed)));
+                    runConsole("npc path");
+                    runConsole("npc teleport " + x + " " + y + " " + z + " " + world.getName());
+
+                    sender.sendMessage("John moving to target.");
+                } catch (Exception ex) {
+                    sender.sendMessage("Invalid args.");
+                }
+                return true;
+            }
+
+            case "follow": {
+                if (args.length < 2) {
+                    sender.sendMessage("Usage: /john follow <player> [speed]");
+                    return true;
+                }
+                Player target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    sender.sendMessage("Player not online.");
+                    return true;
+                }
+                double speed = 1.3;
+                if (args.length >= 3) {
+                    try { speed = Double.parseDouble(args[2]); } catch (Exception ignored) {}
+                }
+                speed = Math.max(0.7, Math.min(2.0, speed));
+
+                runConsole("npc select " + john.getId());
+                runConsole("npc speed " + speed);
+                runConsole("npc follow " + target.getName());
+
+                sender.sendMessage("John now following " + target.getName());
+                return true;
+            }
+
+            case "stop": {
+                runConsole("npc select " + john.getId());
+                runConsole("npc follow --stop");
+                runConsole("npc path --stop");
+                sender.sendMessage("John stopped.");
+                return true;
+            }
+
+            case "idle": {
+                if (args.length < 2) {
+                    sender.sendMessage("Usage: /john idle <on|off>");
+                    return true;
+                }
+                idleEnabled = args[1].equalsIgnoreCase("on");
+                sender.sendMessage("John idle = " + idleEnabled);
+                return true;
+            }
+
+            case "vulnerable": {
+                runConsole("npc select " + john.getId());
+                runConsole("npc vulnerable");
+                sender.sendMessage("Toggled vulnerability.");
+                return true;
+            }
+
+            case "respawndelay": {
+                if (args.length < 2) {
+                    sender.sendMessage("Usage: /john respawndelay <seconds>");
+                    return true;
+                }
+                try {
+                    int sec = Integer.parseInt(args[1]);
+                    runConsole("npc select " + john.getId());
+                    boolean ok = runConsole("npc respawndelay " + sec);
+                    if (!ok) runConsole("npc respawn " + sec);
+                    sender.sendMessage("Respawn delay set.");
+                } catch (Exception ex) {
+                    sender.sendMessage("Invalid number.");
+                }
+                return true;
+            }
+
+            case "skinname": {
+                if (args.length < 2) {
+                    sender.sendMessage("Usage: /john skinname <name>");
+                    return true;
+                }
+                runConsole("npc select " + john.getId());
+                runConsole("npc skin " + args[1]);
+                sender.sendMessage("Skin name set.");
+                return true;
+            }
+
+            case "skintex": {
+                if (args.length < 3) {
+                    sender.sendMessage("Usage: /john skintex <value> <signature>");
+                    return true;
+                }
+                runConsole("npc select " + john.getId());
+                runConsole("npc skin John -t " + args[1] + " " + args[2]);
+                sender.sendMessage("Skin texture applied.");
                 return true;
             }
 
@@ -569,7 +717,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
     private void openJohnInventoryUI(Player viewer) {
         Inventory inv = Bukkit.createInventory(null, 54, "John Inventory");
-
         int slot = 0;
         for (Map.Entry<Material, Integer> e : johnInv.entrySet()) {
             if (slot >= inv.getSize()) break;

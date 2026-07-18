@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import net.citizensnpcs.api.CitizensAPI;
+import net.citizensnpcs.api.ai.Navigator;
 import net.citizensnpcs.api.npc.NPC;
 import org.bukkit.*;
 import org.bukkit.block.Block;
@@ -36,6 +37,10 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     private boolean idleEnabled = true;
     private Location johnHome = null;
 
+    // follow task
+    private UUID followTarget = null;
+    private double followSpeed = 1.25;
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
@@ -45,7 +50,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(this, this);
         getLogger().info("JohnAIController enabled. bridgeUrl=" + bridgeUrl);
 
-        // Auto-talk poll every 5s: HTTP async -> execute sync
+        // Auto-talk poll (HTTP async -> execute sync)
         Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
             try {
                 String resp = getJson(autoTalkUrl);
@@ -55,9 +60,32 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             } catch (Exception ignored) {}
         }, 100L, 100L);
 
-        // Idle natural behavior every 3s
+        // Follow loop (sync)
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            if (followTarget == null) return;
+            Player target = Bukkit.getPlayer(followTarget);
+            NPC john = getJohn();
+            if (target == null || john == null || !john.isSpawned() || john.getEntity() == null) return;
+
+            if (!target.getWorld().equals(john.getEntity().getWorld())) return;
+
+            double dist = john.getEntity().getLocation().distance(target.getLocation());
+            if (dist < 2.0) {
+                john.getNavigator().cancelNavigation();
+                return;
+            }
+
+            Navigator nav = john.getNavigator();
+            nav.getDefaultParameters().speedModifier((float) clampSpeed(followSpeed));
+            nav.getDefaultParameters().distanceMargin(1.5);
+            nav.setTarget(target, false);
+        }, 10L, 10L);
+
+        // Idle behavior (sync)
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             if (!idleEnabled) return;
+            if (followTarget != null) return; // don't idle while following
+
             NPC john = getJohn();
             if (john == null || !john.isSpawned() || john.getEntity() == null) return;
 
@@ -70,7 +98,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
             int roll = rng.nextInt(100);
 
-            // 0-44: natural look around
+            // look around
             if (roll < 45) {
                 float yaw = cur.getYaw() + (rng.nextFloat() * 50f - 25f);
                 float pitch = Math.max(-30f, Math.min(25f, cur.getPitch() + (rng.nextFloat() * 14f - 7f)));
@@ -81,17 +109,21 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 return;
             }
 
-            // 45-84: wander near home (small, cleaner movements)
+            // walk around home with pathfinding
             if (roll < 85) {
                 double dx = rng.nextDouble() * 6.0 - 3.0;
                 double dz = rng.nextDouble() * 6.0 - 3.0;
                 Location target = johnHome.clone().add(dx, 0, dz);
                 target.setY(cur.getWorld().getHighestBlockYAt(target) + 1.0);
-                john.teleport(target, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
+
+                Navigator nav = john.getNavigator();
+                nav.getDefaultParameters().speedModifier(1.15f);
+                nav.getDefaultParameters().distanceMargin(1.3);
+                nav.setTarget(target);
                 return;
             }
 
-            // 85-99: tiny jump-like bounce
+            // tiny jump-ish motion
             Location up = cur.clone().add(0, 0.42, 0);
             je.teleport(up);
             Bukkit.getScheduler().runTaskLater(this, () -> {
@@ -133,7 +165,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         String message = event.getMessage().trim();
         if (message.isEmpty()) return;
 
-        // Build Bukkit context ON MAIN THREAD
+        // Build context on main thread
         Bukkit.getScheduler().runTask(this, () -> {
             JsonObject payload;
             try {
@@ -143,14 +175,14 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 return;
             }
 
-            // HTTP call OFF MAIN THREAD
+            // HTTP async
             Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
                 try {
                     String response = postJson(bridgeUrl, gson.toJson(payload));
                     BridgeResponse br = gson.fromJson(response, BridgeResponse.class);
                     if (br == null || br.commands == null || br.commands.isEmpty()) return;
 
-                    // Execute ON MAIN THREAD
+                    // execute sync
                     Bukkit.getScheduler().runTask(this, () -> executeCommands(br.commands));
                 } catch (Exception e) {
                     getLogger().warning("Bridge error: " + e.getMessage());
@@ -175,7 +207,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             johnObj.add("location", locToJson(jl));
             johnObj.addProperty("blockUnder", blockUnder(jl));
 
-            // real block raycast from John forward
+            // real forward block raycast
             RayTraceResult ray = jl.getWorld().rayTraceBlocks(
                     jl.clone().add(0, 1.62, 0),
                     jl.getDirection(),
@@ -192,7 +224,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 johnObj.add("lookingAtBlock", null);
             }
 
-            // nearby entities (main thread safe here)
             JsonArray nearbyEntities = new JsonArray();
             for (Entity e : je.getNearbyEntities(16, 16, 16)) {
                 JsonObject eo = new JsonObject();
@@ -205,7 +236,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 nearbyEntities.add(eo);
             }
             johnObj.add("nearbyEntities", nearbyEntities);
-
             johnObj.add("nearbyBlockSummary", sampleBlockSummary(jl, 4, 220));
         } else {
             johnObj.addProperty("spawned", false);
@@ -227,7 +257,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     speaker.addProperty("distanceToJohn", round(jl.distance(pl)));
                 }
             }
-
             root.add("speaker", speaker);
         }
 
@@ -253,25 +282,20 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     }
 
     private String blockUnder(Location l) {
-        Location b = l.clone().subtract(0, 1, 0);
-        return b.getBlock().getType().name();
+        return l.clone().subtract(0, 1, 0).getBlock().getType().name();
     }
 
     private void smoothLookAt(Entity npcEntity, Location target, double yOffset) {
         Location from = npcEntity.getLocation();
         Location to = target.clone().add(0, yOffset, 0);
-
         Vector dir = to.toVector().subtract(from.toVector());
-        if (dir.lengthSquared() < 1.0e-6) return;
+        if (dir.lengthSquared() < 1e-6) return;
 
         Location wanted = from.clone();
         wanted.setDirection(dir);
 
-        float cy = from.getYaw(), cp = from.getPitch();
-        float wy = wanted.getYaw(), wp = wanted.getPitch();
-
-        float ny = lerpAngle(cy, wy, 0.35f);
-        float np = cp + (wp - cp) * 0.35f;
+        float ny = lerpAngle(from.getYaw(), wanted.getYaw(), 0.35f);
+        float np = from.getPitch() + (wanted.getPitch() - from.getPitch()) * 0.35f;
 
         Location out = from.clone();
         out.setYaw(ny);
@@ -341,6 +365,10 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return Math.round(v * 100.0) / 100.0;
     }
 
+    private double clampSpeed(double s) {
+        return Math.max(0.7, Math.min(2.0, s));
+    }
+
     private String postJson(String targetUrl, String json) throws Exception {
         HttpURLConnection con = (HttpURLConnection) new URL(targetUrl).openConnection();
         con.setRequestMethod("POST");
@@ -386,9 +414,11 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
         if (args.length == 0) {
             sender.sendMessage("§e/john say <text>");
-            sender.sendMessage("§e/john move <x> <y> <z> [world]");
-            sender.sendMessage("§e/john tp <player>");
             sender.sendMessage("§e/john look <player>");
+            sender.sendMessage("§e/john goto <x> <y> <z> [world] [speed]");
+            sender.sendMessage("§e/john follow <player> [speed]");
+            sender.sendMessage("§e/john stop");
+            sender.sendMessage("§e/john move <x> <y> <z> [world]  (legacy teleport)");
             sender.sendMessage("§e/john vulnerable");
             sender.sendMessage("§e/john respawndelay <seconds>");
             sender.sendMessage("§e/john skinname <name>");
@@ -410,22 +440,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 Bukkit.broadcastMessage("§bJohn§7: " + msg);
                 return true;
             }
-            case "tp": {
-                if (args.length < 2) {
-                    sender.sendMessage("Usage: /john tp <player>");
-                    return true;
-                }
-                Player target = Bukkit.getPlayerExact(args[1]);
-                if (target == null) {
-                    sender.sendMessage("Player not online.");
-                    return true;
-                }
-                Location loc = target.getLocation();
-                if (!john.isSpawned()) john.spawn(loc);
-                else john.teleport(loc, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
-                sender.sendMessage("Teleported John to " + target.getName());
-                return true;
-            }
+
             case "look": {
                 if (args.length < 2) {
                     sender.sendMessage("Usage: /john look <player>");
@@ -443,7 +458,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
                 Entity je = john.getEntity();
                 Location targetLoc = target.getLocation();
-
                 for (int i = 0; i < 4; i++) {
                     int delay = i;
                     Bukkit.getScheduler().runTaskLater(this, () -> {
@@ -454,7 +468,86 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 sender.sendMessage("John now looks at " + target.getName());
                 return true;
             }
-            case "move": {
+
+            case "goto": {
+                if (args.length < 4) {
+                    sender.sendMessage("Usage: /john goto <x> <y> <z> [world] [speed]");
+                    return true;
+                }
+                try {
+                    double x = Double.parseDouble(args[1]);
+                    double y = Double.parseDouble(args[2]);
+                    double z = Double.parseDouble(args[3]);
+
+                    World world = null;
+                    double speed = 1.2;
+
+                    if (args.length >= 5) {
+                        World maybe = Bukkit.getWorld(args[4]);
+                        if (maybe != null) world = maybe;
+                        else speed = Double.parseDouble(args[4]); // maybe it's speed
+                    }
+
+                    if (args.length >= 6) {
+                        speed = Double.parseDouble(args[5]);
+                    }
+
+                    if (world == null) {
+                        Entity e = john.getEntity();
+                        world = (e != null) ? e.getWorld() : Bukkit.getWorlds().get(0);
+                    }
+
+                    if (!john.isSpawned()) {
+                        john.spawn(new Location(world, x, y, z));
+                    }
+
+                    Location target = new Location(world, x, y, z);
+                    Navigator nav = john.getNavigator();
+                    nav.getDefaultParameters().speedModifier((float) clampSpeed(speed));
+                    nav.getDefaultParameters().distanceMargin(1.2);
+                    nav.setTarget(target);
+
+                    followTarget = null; // cancel follow mode
+                    sender.sendMessage("John walking to target.");
+                } catch (Exception ex) {
+                    sender.sendMessage("Invalid args. Usage: /john goto <x> <y> <z> [world] [speed]");
+                }
+                return true;
+            }
+
+            case "follow": {
+                if (args.length < 2) {
+                    sender.sendMessage("Usage: /john follow <player> [speed]");
+                    return true;
+                }
+                Player target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    sender.sendMessage("Player not online.");
+                    return true;
+                }
+
+                double speed = 1.25;
+                if (args.length >= 3) {
+                    try { speed = Double.parseDouble(args[2]); } catch (Exception ignored) {}
+                }
+
+                followTarget = target.getUniqueId();
+                followSpeed = clampSpeed(speed);
+
+                if (!john.isSpawned()) john.spawn(target.getLocation());
+
+                sender.sendMessage("John now following " + target.getName() + " at speed " + followSpeed);
+                return true;
+            }
+
+            case "stop": {
+                followTarget = null;
+                john.getNavigator().cancelNavigation();
+                sender.sendMessage("John stopped.");
+                return true;
+            }
+
+            case "move": { // legacy teleport command
                 if (args.length < 4) {
                     sender.sendMessage("Usage: /john move <x> <y> <z> [world]");
                     return true;
@@ -480,17 +573,19 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     if (!john.isSpawned()) john.spawn(loc);
                     else john.teleport(loc, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
 
-                    sender.sendMessage("Moved John.");
+                    sender.sendMessage("Teleported John.");
                 } catch (Exception ex) {
                     sender.sendMessage("Invalid coordinates.");
                 }
                 return true;
             }
+
             case "vulnerable": {
-                runConsole("npc vulnerable"); // toggle on your build
+                runConsole("npc vulnerable"); // toggle in your citizens build
                 sender.sendMessage("Toggled vulnerability.");
                 return true;
             }
+
             case "respawndelay": {
                 if (args.length < 2) {
                     sender.sendMessage("Usage: /john respawndelay <seconds>");
@@ -506,6 +601,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 }
                 return true;
             }
+
             case "skinname": {
                 if (args.length < 2) {
                     sender.sendMessage("Usage: /john skinname <name>");
@@ -515,6 +611,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 sender.sendMessage("Skin name set.");
                 return true;
             }
+
             case "skintex": {
                 if (args.length < 3) {
                     sender.sendMessage("Usage: /john skintex <value> <signature>");
@@ -526,6 +623,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 sender.sendMessage("Skin texture applied.");
                 return true;
             }
+
             case "idle": {
                 if (args.length < 2) {
                     sender.sendMessage("Usage: /john idle <on|off>");
@@ -535,6 +633,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 sender.sendMessage("John idle = " + idleEnabled);
                 return true;
             }
+
             default:
                 sender.sendMessage("Unknown subcommand.");
                 return true;

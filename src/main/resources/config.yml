@@ -1,1 +1,2 @@
 bridgeUrl: "http://127.0.0.1:3001/chat"
+autoTalkUrl: "http://127.0.0.1:3001/autotalk"

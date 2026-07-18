@@ -10,7 +10,6 @@ import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
-import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -42,7 +41,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(this, this);
         getLogger().info("JohnAIController enabled. bridgeUrl=" + bridgeUrl);
 
-        // Poll autonomous talk every 5 seconds
+        // Auto-talk poll every 5s: HTTP async, execute commands sync
         Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
             try {
                 String resp = getJson(autoTalkUrl);
@@ -86,18 +85,29 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         String message = event.getMessage().trim();
         if (message.isEmpty()) return;
 
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+        // IMPORTANT: Bukkit world/entity access MUST be on main thread.
+        Bukkit.getScheduler().runTask(this, () -> {
+            JsonObject payload;
             try {
-                JsonObject payload = buildContextPayload(playerName, message);
-                String response = postJson(bridgeUrl, gson.toJson(payload));
-
-                BridgeResponse br = gson.fromJson(response, BridgeResponse.class);
-                if (br == null || br.commands == null || br.commands.isEmpty()) return;
-
-                Bukkit.getScheduler().runTask(this, () -> executeCommands(br.commands));
-            } catch (Exception e) {
-                getLogger().warning("Bridge error: " + e.getMessage());
+                payload = buildContextPayload(playerName, message); // sync-safe
+            } catch (Exception ex) {
+                getLogger().warning("Context build failed: " + ex.getMessage());
+                return;
             }
+
+            // HTTP call async
+            Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+                try {
+                    String response = postJson(bridgeUrl, gson.toJson(payload));
+                    BridgeResponse br = gson.fromJson(response, BridgeResponse.class);
+                    if (br == null || br.commands == null || br.commands.isEmpty()) return;
+
+                    // Execute commands on main thread
+                    Bukkit.getScheduler().runTask(this, () -> executeCommands(br.commands));
+                } catch (Exception e) {
+                    getLogger().warning("Bridge error: " + e.getMessage());
+                }
+            });
         });
     }
 
@@ -116,9 +126,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             johnObj.addProperty("spawned", true);
             johnObj.add("location", locToJson(jl));
 
-            // What block John is looking at (up to 32 blocks)
+            // looking-at block
             RayTraceResult ray = jl.getWorld().rayTraceBlocks(
-                    jl.clone().add(0, 1.62, 0), // eye-ish
+                    jl.clone().add(0, 1.62, 0),
                     jl.getDirection(),
                     32.0
             );
@@ -133,7 +143,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 johnObj.add("lookingAtBlock", null);
             }
 
-            // Nearby entities around John (radius 16)
+            // nearby entities (SYNC ONLY)
             JsonArray nearbyEntities = new JsonArray();
             for (Entity e : je.getNearbyEntities(16, 16, 16)) {
                 JsonObject eo = new JsonObject();
@@ -145,7 +155,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             }
             johnObj.add("nearbyEntities", nearbyEntities);
 
-            // Nearby blocks summary around John (cube radius 4, sampled)
+            // nearby blocks summary
             johnObj.add("nearbyBlockSummary", sampleBlockSummary(jl, 4, 220));
         } else {
             johnObj.addProperty("spawned", false);
@@ -153,7 +163,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
         root.add("john", johnObj);
 
-        // Speaker context
+        // speaker
         Player p = Bukkit.getPlayerExact(playerName);
         if (p != null) {
             JsonObject speaker = new JsonObject();
@@ -167,11 +177,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     speaker.addProperty("distanceToJohn", round(jl.distance(pl)));
                 }
             }
-
             root.add("speaker", speaker);
         }
 
-        // World context
         World w = (p != null) ? p.getWorld() : Bukkit.getWorlds().get(0);
         JsonObject world = new JsonObject();
         world.addProperty("name", w.getName());
@@ -180,7 +188,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         world.addProperty("weather", w.hasStorm() ? "rain_or_thunder" : "clear");
         root.add("world", world);
 
-        // Online players
         JsonArray players = new JsonArray();
         for (Player op : Bukkit.getOnlinePlayers()) {
             JsonObject po = new JsonObject();
@@ -217,7 +224,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             sampled++;
         }
 
-        // top 12 block types
         List<Map.Entry<String, Integer>> top = counts.entrySet().stream()
                 .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
                 .limit(12)
@@ -353,7 +359,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 Entity je = john.getEntity();
                 Location from = je.getLocation();
 
-                // Better facing: body/head center, not too high
+                // Better facing: body/head center
                 Location to = target.getLocation().clone().add(0, 1.2, 0);
 
                 Vector dir = to.toVector().subtract(from.toVector());
@@ -397,7 +403,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 return true;
             }
             case "vulnerable": {
-                runConsole("npc vulnerable"); // toggle on your build
+                runConsole("npc vulnerable"); // toggle
                 sender.sendMessage("Toggled vulnerability.");
                 return true;
             }

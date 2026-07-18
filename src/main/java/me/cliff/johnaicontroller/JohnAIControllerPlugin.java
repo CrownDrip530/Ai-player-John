@@ -13,6 +13,7 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -20,11 +21,9 @@ import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.RayTraceResult;
-import org.bukkit.util.Vector;
 
 import java.io.File;
 import java.io.InputStream;
@@ -40,10 +39,10 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     private final Gson gson = new Gson();
 
     private String bridgeUrl = "http://127.0.0.1:3001/chat";
-    private String autoTalkUrl = "http://127.0.0.1:3001/autotalk";
 
-    // ----------------- Simulated inventory -----------------
+    // ---------- Simulated inventory ----------
     private final Map<Material, Integer> johnInv = new HashMap<>();
+
     private Material equippedMainHand = null;
     private Material equippedOffHand = null;
     private Material equippedHelmet = null;
@@ -58,7 +57,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         bridgeUrl = getConfig().getString("bridgeUrl", bridgeUrl);
-        autoTalkUrl = getConfig().getString("autoTalkUrl", autoTalkUrl);
 
         setupDataFile();
         loadJohnData();
@@ -73,7 +71,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         getLogger().info("JohnAIController disabled.");
     }
 
-    // ----------------- Files -----------------
+    // ---------- Files ----------
     private void setupDataFile() {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         dataFile = new File(getDataFolder(), "john-data.yml");
@@ -96,9 +94,8 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         dataCfg.set("equip.legs", materialName(equippedLegs));
         dataCfg.set("equip.boots", materialName(equippedBoots));
 
-        try { dataCfg.save(dataFile); } catch (Exception e) {
-            getLogger().warning("Failed to save john-data.yml: " + e.getMessage());
-        }
+        try { dataCfg.save(dataFile); }
+        catch (Exception e) { getLogger().warning("Failed to save john-data.yml: " + e.getMessage()); }
     }
 
     private void loadJohnData() {
@@ -121,16 +118,10 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         applyVisualEquipment();
     }
 
-    private String materialName(Material m) {
-        return m == null ? null : m.name();
-    }
+    private String materialName(Material m) { return m == null ? null : m.name(); }
+    private Material parseMaterial(String s) { return (s == null || s.isEmpty()) ? null : Material.matchMaterial(s); }
 
-    private Material parseMaterial(String s) {
-        if (s == null || s.isEmpty()) return null;
-        return Material.matchMaterial(s);
-    }
-
-    // ----------------- NPC -----------------
+    // ---------- NPC ----------
     private NPC getJohn() {
         for (NPC npc : CitizensAPI.getNPCRegistry()) {
             if ("John".equals(npc.getName())) return npc;
@@ -142,10 +133,8 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
     }
 
-    // ----------------- Inventory helpers -----------------
-    private int getCount(Material m) {
-        return johnInv.getOrDefault(m, 0);
-    }
+    // ---------- Inventory helpers ----------
+    private int getCount(Material m) { return johnInv.getOrDefault(m, 0); }
 
     private void addItem(Material m, int amount) {
         if (m == null || amount <= 0) return;
@@ -184,10 +173,16 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return null;
     }
 
+    private ItemStack itemOrAir(Material m) {
+        return (m == null) ? new ItemStack(Material.AIR) : new ItemStack(m, 1);
+    }
+
     private void applyVisualEquipment() {
         NPC john = getJohn();
         if (john == null || !john.isSpawned() || john.getEntity() == null) return;
-        EntityEquipment eq = john.getEntity().getEquipment();
+        if (!(john.getEntity() instanceof LivingEntity le)) return;
+
+        EntityEquipment eq = le.getEquipment();
         if (eq == null) return;
 
         eq.setItemInMainHand(itemOrAir(equippedMainHand));
@@ -196,10 +191,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         eq.setChestplate(itemOrAir(equippedChest));
         eq.setLeggings(itemOrAir(equippedLegs));
         eq.setBoots(itemOrAir(equippedBoots));
-    }
-
-    private ItemStack itemOrAir(Material m) {
-        return (m == null) ? new ItemStack(Material.AIR) : new ItemStack(m, 1);
     }
 
     private JsonArray inventoryToJson() {
@@ -224,7 +215,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return o;
     }
 
-    // ----------------- Chat -> bridge payload -----------------
+    // ---------- Chat -> bridge ----------
     @EventHandler
     public void onChat(AsyncPlayerChatEvent event) {
         String playerName = event.getPlayer().getName();
@@ -302,10 +293,8 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             johnObj.addProperty("spawned", false);
         }
 
-        // NEW: inventory + equipment for AI
         johnObj.add("inventory", inventoryToJson());
         johnObj.add("equipment", equipmentToJson());
-
         root.add("john", johnObj);
 
         Player p = Bukkit.getPlayerExact(playerName);
@@ -374,7 +363,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return new String(is.readAllBytes(), StandardCharsets.UTF_8);
     }
 
-    // ----------------- Commands -----------------
+    // ---------- Commands ----------
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!sender.hasPermission("johnaicontroller.use")) {
@@ -455,8 +444,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 }
 
                 Location l = john.getEntity().getLocation().clone().add(0, 1.0, 0);
-                ItemStack stack = new ItemStack(m, count);
-                l.getWorld().dropItemNaturally(l, stack);
+                l.getWorld().dropItemNaturally(l, new ItemStack(m, count));
 
                 saveJohnData();
                 sender.sendMessage("§aJohn dropped " + count + " " + m.name());
@@ -563,7 +551,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    // ----------------- Feature impls -----------------
+    // ---------- Feature impl ----------
     private int pickupNearbyItems(Location center, double radius) {
         int pickedStacks = 0;
         for (Entity e : center.getWorld().getNearbyEntities(center, radius, radius, radius)) {
@@ -588,7 +576,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             inv.setItem(slot++, new ItemStack(e.getKey(), Math.min(64, e.getValue())));
         }
 
-        // simple equipment display in last row
+        // equipment display
         inv.setItem(45, itemOrAir(equippedMainHand));
         inv.setItem(46, itemOrAir(equippedOffHand));
         inv.setItem(50, itemOrAir(equippedHelmet));
@@ -603,16 +591,11 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         Location l = johnEntity.getLocation();
         World w = l.getWorld();
 
-        // food: heal-ish + eat sound
         if (isFood(m)) {
-            if (johnEntity instanceof Player p) {
-                p.setHealth(Math.min(p.getMaxHealth(), p.getHealth() + 4.0));
-            }
             w.playSound(l, Sound.ENTITY_GENERIC_EAT, 1f, 1f);
             return true;
         }
 
-        // shield in offhand-like usage
         if (m == Material.SHIELD) {
             equippedOffHand = Material.SHIELD;
             applyVisualEquipment();
@@ -620,17 +603,13 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             return true;
         }
 
-        // bucket-like simple effect
         if (m == Material.WATER_BUCKET) {
             Block b = l.getBlock();
-            if (b.getType() == Material.AIR) {
-                b.setType(Material.WATER);
-            }
+            if (b.getType() == Material.AIR) b.setType(Material.WATER);
             w.playSound(l, Sound.ITEM_BUCKET_EMPTY, 1f, 1f);
             return true;
         }
 
-        // torch place-ish
         if (m == Material.TORCH) {
             Block b = l.getBlock().getRelative(0, 1, 0);
             if (b.getType() == Material.AIR) {
@@ -640,10 +619,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
             }
         }
 
-        // potion-ish
         if (m == Material.POTION) {
-            if (johnEntity instanceof Player p) {
-                p.addPotionEffect(PotionEffectType.REGENERATION.createEffect(100, 0));
+            if (johnEntity instanceof LivingEntity le) {
+                le.addPotionEffect(PotionEffectType.REGENERATION.createEffect(100, 0));
             }
             w.playSound(l, Sound.ENTITY_GENERIC_DRINK, 1f, 1f);
             return true;
@@ -652,7 +630,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return false;
     }
 
-    // ----------------- bridge DTO -----------------
     static class BridgeResponse {
         List<String> commands;
     }

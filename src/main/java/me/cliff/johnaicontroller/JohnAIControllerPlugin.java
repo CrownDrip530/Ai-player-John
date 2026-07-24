@@ -44,7 +44,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     private final Gson gson = new Gson();
     private String bridgeUrl = "http://127.0.0.1:3001/chat";
 
-    // ---------- Simulated inventory ----------
+    // Simulated inventory
     private final Map<Material, Integer> johnInv = new HashMap<>();
     private Material equippedMainHand = null;
     private Material equippedOffHand = null;
@@ -56,13 +56,18 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     private File dataFile;
     private FileConfiguration dataCfg;
 
-    // ---------- Movement/behavior ----------
+    // Behavior
     private boolean idleEnabled = true;
     private UUID followTarget = null;
     private double followSpeed = 1.3;
-    private BukkitTask followTask;
 
-    // ---------- Inventory UI ----------
+    private BukkitTask followTask;
+    private BukkitTask passivePickupTask;
+    private BukkitTask roamTask;
+
+    private final Random rng = new Random();
+
+    // GUI
     private static final String JOHN_INV_TITLE = "John Inventory";
     private final Set<UUID> johnInvViewers = new HashSet<>();
 
@@ -76,37 +81,76 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
         Bukkit.getPluginManager().registerEvents(this, this);
 
-        // Follow scheduler (API-based, reliable)
+        // Follow loop
         followTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
             if (followTarget == null) return;
 
             NPC john = getJohn();
             if (john == null || !john.isSpawned() || john.getEntity() == null) return;
 
-            Player target = Bukkit.getPlayer(followTarget);
-            if (target == null || !target.isOnline()) return;
-            if (!target.getWorld().equals(john.getEntity().getWorld())) return;
+            Player t = Bukkit.getPlayer(followTarget);
+            if (t == null || !t.isOnline()) return;
+            if (!t.getWorld().equals(john.getEntity().getWorld())) return;
 
-            double dist = john.getEntity().getLocation().distance(target.getLocation());
+            double dist = john.getEntity().getLocation().distance(t.getLocation());
             Navigator nav = john.getNavigator();
             nav.getDefaultParameters().speedModifier((float) clamp(followSpeed, 0.7, 2.0));
             nav.getDefaultParameters().distanceMargin(1.6);
 
-            if (dist > 2.0) nav.setTarget(target, false);
+            if (dist > 2.0) nav.setTarget(t, false);
             else nav.cancelNavigation();
         }, 10L, 10L);
 
-        getLogger().info("JohnAIController fixed build enabled.");
+        // Passive pickup loop
+        passivePickupTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            NPC john = getJohn();
+            if (john == null || !john.isSpawned() || john.getEntity() == null) return;
+            int picked = pickupNearbyItems(john.getEntity().getLocation(), 2.2);
+            if (picked > 0) saveJohnData();
+        }, 10L, 10L);
+
+        // Roam loop
+        roamTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            if (!idleEnabled) return;
+            if (followTarget != null) return;
+
+            NPC john = getJohn();
+            if (john == null || !john.isSpawned() || john.getEntity() == null) return;
+
+            // 65% chance to walk around
+            if (rng.nextInt(100) >= 65) return;
+
+            Entity je = john.getEntity();
+            Location cur = je.getLocation();
+
+            double dx = (rng.nextDouble() * 10.0) - 5.0;
+            double dz = (rng.nextDouble() * 10.0) - 5.0;
+            Location target = cur.clone().add(dx, 0, dz);
+            target.setY(cur.getWorld().getHighestBlockYAt(target) + 1);
+
+            Navigator nav = john.getNavigator();
+            nav.getDefaultParameters().speedModifier(1.15f);
+            nav.getDefaultParameters().distanceMargin(1.4);
+            nav.setTarget(target);
+
+            if (rng.nextInt(100) < 18) {
+                Bukkit.broadcastMessage("§bJohn§7: yo, come here, this looks kinda cool");
+            }
+        }, 100L, 100L);
+
+        getLogger().info("JohnAIController v7a enabled.");
     }
 
     @Override
     public void onDisable() {
         if (followTask != null) followTask.cancel();
+        if (passivePickupTask != null) passivePickupTask.cancel();
+        if (roamTask != null) roamTask.cancel();
         saveJohnData();
         getLogger().info("JohnAIController disabled.");
     }
 
-    // ---------- Files ----------
+    // ---------- File data ----------
     private void setupDataFile() {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         dataFile = new File(getDataFolder(), "john-data.yml");
@@ -129,8 +173,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         dataCfg.set("equip.legs", materialName(equippedLegs));
         dataCfg.set("equip.boots", materialName(equippedBoots));
 
-        try { dataCfg.save(dataFile); }
-        catch (Exception e) { getLogger().warning("Failed to save john-data.yml: " + e.getMessage()); }
+        try { dataCfg.save(dataFile); } catch (Exception e) {
+            getLogger().warning("Failed to save john-data.yml: " + e.getMessage());
+        }
     }
 
     private void loadJohnData() {
@@ -168,7 +213,11 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
     }
 
-    // ---------- Inventory helpers ----------
+    // ---------- Helpers ----------
+    private double clamp(double v, double min, double max) {
+        return Math.max(min, Math.min(max, v));
+    }
+
     private int getCount(Material m) { return johnInv.getOrDefault(m, 0); }
 
     private void addItem(Material m, int amount) {
@@ -209,7 +258,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
     }
 
     private ItemStack itemOrAir(Material m) {
-        return (m == null) ? new ItemStack(Material.AIR) : new ItemStack(m, 1);
+        return m == null ? new ItemStack(Material.AIR) : new ItemStack(m, 1);
     }
 
     private void applyVisualEquipment() {
@@ -257,18 +306,15 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         String message = event.getMessage().trim();
         if (message.isEmpty()) return;
 
-        // Build context ON MAIN THREAD
         Bukkit.getScheduler().runTask(this, () -> {
             JsonObject payload = buildContextPayload(playerName, message);
 
-            // Send HTTP async
             Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
                 try {
                     String response = postJson(bridgeUrl, gson.toJson(payload));
                     BridgeResponse br = gson.fromJson(response, BridgeResponse.class);
                     if (br == null || br.commands == null || br.commands.isEmpty()) return;
 
-                    // Execute commands ON MAIN THREAD
                     Bukkit.getScheduler().runTask(this, () -> {
                         for (String cmd : br.commands) {
                             if (cmd == null || cmd.isBlank()) continue;
@@ -382,10 +428,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         return Math.round(v * 100.0) / 100.0;
     }
 
-    private double clamp(double v, double min, double max) {
-        return Math.max(min, Math.min(max, v));
-    }
-
     private String postJson(String targetUrl, String json) throws Exception {
         HttpURLConnection con = (HttpURLConnection) new URL(targetUrl).openConnection();
         con.setRequestMethod("POST");
@@ -401,6 +443,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         InputStream is = (con.getResponseCode() >= 200 && con.getResponseCode() < 300)
                 ? con.getInputStream()
                 : con.getErrorStream();
+
         return new String(is.readAllBytes(), StandardCharsets.UTF_8);
     }
 
@@ -487,10 +530,8 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("John doesn't have enough " + m.name());
                     return true;
                 }
-
                 Location l = john.getEntity().getLocation().clone().add(0, 1.0, 0);
                 l.getWorld().dropItemNaturally(l, new ItemStack(m, count));
-
                 saveJohnData();
                 sender.sendMessage("§aJohn dropped " + count + " " + m.name());
                 return true;
@@ -520,7 +561,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 } else {
                     equippedMainHand = m;
                 }
-
                 applyVisualEquipment();
                 saveJohnData();
                 sender.sendMessage("§aEquipped " + m.name());
@@ -541,7 +581,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("John doesn't have that item.");
                     return true;
                 }
-
                 equippedOffHand = m;
                 applyVisualEquipment();
                 saveJohnData();
@@ -567,7 +606,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                     sender.sendMessage("John doesn't have that item.");
                     return true;
                 }
-
                 boolean ok = simulateUseItem(john.getEntity(), m);
                 if (ok) {
                     removeItem(m, 1);
@@ -606,7 +644,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
                 Entity je = john.getEntity();
                 Location from = je.getLocation();
-                Location to = target.getLocation().clone().add(0, 0.6, 0); // lower to avoid looking too high
+                Location to = target.getLocation().clone().add(0, 0.6, 0);
                 Vector dir = to.toVector().subtract(from.toVector());
                 Location out = from.clone();
                 out.setDirection(dir);
@@ -641,11 +679,9 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                         world = (e != null) ? e.getWorld() : Bukkit.getWorlds().get(0);
                     }
 
-                    if (!john.isSpawned()) {
-                        john.spawn(new Location(world, x, y, z));
-                    }
+                    if (!john.isSpawned()) john.spawn(new Location(world, x, y, z));
 
-                    followTarget = null; // stop follow mode when goto
+                    followTarget = null;
                     Navigator nav = john.getNavigator();
                     nav.getDefaultParameters().speedModifier((float) clamp(speed, 0.7, 2.0));
                     nav.getDefaultParameters().distanceMargin(1.3);
@@ -673,13 +709,12 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
                 if (args.length >= 3) {
                     try { speed = Double.parseDouble(args[2]); } catch (Exception ignored) {}
                 }
-                speed = clamp(speed, 0.7, 2.0);
 
                 if (!john.isSpawned()) john.spawn(target.getLocation());
 
                 followTarget = target.getUniqueId();
-                followSpeed = speed;
-                sender.sendMessage("John now following " + target.getName() + " at speed " + speed);
+                followSpeed = clamp(speed, 0.7, 2.0);
+                sender.sendMessage("John now following " + target.getName());
                 return true;
             }
 
@@ -702,7 +737,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
             case "vulnerable": {
                 runConsole("npc select " + john.getId());
-                runConsole("npc vulnerable"); // your Citizens build uses toggle
+                runConsole("npc vulnerable");
                 sender.sendMessage("Toggled vulnerability.");
                 return true;
             }
@@ -752,17 +787,14 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    // ---------- Inventory GUI persistence ----------
+    // ---------- GUI persistence ----------
     @EventHandler
     public void onJohnInvClick(InventoryClickEvent e) {
         if (e.getView() == null) return;
         if (!JOHN_INV_TITLE.equals(e.getView().getTitle())) return;
         if (e.getClickedInventory() == null) return;
-
-        // Only top inv (John UI) editable check
         if (!e.getClickedInventory().equals(e.getView().getTopInventory())) return;
 
-        // lock equipment display slots
         int s = e.getSlot();
         if (s == 45 || s == 46 || s == 50 || s == 51 || s == 52 || s == 53) {
             e.setCancelled(true);
@@ -777,7 +809,6 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
         Inventory top = e.getView().getTopInventory();
 
-        // rebuild from storage slots 0..44 only
         johnInv.clear();
         for (int i = 0; i <= 44; i++) {
             ItemStack it = top.getItem(i);
@@ -798,6 +829,7 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
             addItem(stack.getType(), stack.getAmount());
             item.remove();
+            center.getWorld().playSound(center, Sound.ENTITY_ITEM_PICKUP, 0.4f, 1.2f);
             pickedStacks++;
         }
         applyVisualEquipment();
@@ -809,11 +841,10 @@ public class JohnAIControllerPlugin extends JavaPlugin implements Listener {
 
         int slot = 0;
         for (Map.Entry<Material, Integer> e : johnInv.entrySet()) {
-            if (slot >= 45) break; // reserve bottom row for equipment display
+            if (slot >= 45) break;
             inv.setItem(slot++, new ItemStack(e.getKey(), Math.min(64, e.getValue())));
         }
 
-        // equipment display row
         inv.setItem(45, itemOrAir(equippedMainHand));
         inv.setItem(46, itemOrAir(equippedOffHand));
         inv.setItem(50, itemOrAir(equippedHelmet));

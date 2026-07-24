@@ -1,5 +1,5 @@
 name: JohnAIController
-version: 6.0.0
+version: 7.0.0
 main: me.cliff.johnaicontroller.JohnAIControllerPlugin
 api-version: '1.20'
 depend: [Citizens]
@@ -7,7 +7,7 @@ depend: [Citizens]
 commands:
   john:
     description: Control NPC John
-    usage: /john <inv|pickup|drop|equip|offhand|use|say>
+    usage: /john <inv|pickup|drop|equip|offhand|use|say|look|goto|follow|stop|idle|vulnerable|respawndelay|skinname|skintex>
     permission: johnaicontroller.use
 
 permissions:
